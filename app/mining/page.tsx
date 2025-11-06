@@ -6,7 +6,8 @@ import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { StatCard } from '@/components/ui/stat-card';
 import { Alert } from '@/components/ui/alert';
-import { Play, Square, Home, Loader2, Activity, Clock, Target, Hash, CheckCircle2, Wallet, Terminal, ChevronDown, ChevronUp, Pause, Play as PlayIcon, Maximize2, Minimize2, Cpu, ListChecks, TrendingUp, TrendingDown, Calendar, Copy, Check, XCircle, Users, Award, Zap, MapPin } from 'lucide-react';
+import { Modal } from '@/components/ui/modal';
+import { Play, Square, Home, Loader2, Activity, Clock, Target, Hash, CheckCircle2, Wallet, Terminal, ChevronDown, ChevronUp, Pause, Play as PlayIcon, Maximize2, Minimize2, Cpu, ListChecks, TrendingUp, TrendingDown, Calendar, Copy, Check, XCircle, Users, Award, Zap, MapPin, AlertCircle } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
 interface WorkerStats {
@@ -65,9 +66,28 @@ interface ErrorEntry {
   error: string;
 }
 
+interface AddressHistory {
+  addressIndex: number;
+  address: string;
+  challengeId: string;
+  successCount: number;
+  failureCount: number;
+  totalAttempts: number;
+  status: 'success' | 'failed' | 'pending';
+  lastAttempt: string;
+  failures: Array<{
+    ts: string;
+    nonce: string;
+    hash: string;
+    error: string;
+  }>;
+  successTimestamp?: string;
+}
+
 interface HistoryData {
   receipts: ReceiptEntry[];
   errors: ErrorEntry[];
+  addressHistory: AddressHistory[];
   summary: {
     totalSolutions: number;
     totalErrors: number;
@@ -102,6 +122,8 @@ function MiningDashboardContent() {
   const [historyLoading, setHistoryLoading] = useState(false);
   const [historyFilter, setHistoryFilter] = useState<'all' | 'success' | 'error'>('all');
   const [copiedId, setCopiedId] = useState<string | null>(null);
+  const [failureModalOpen, setFailureModalOpen] = useState(false);
+  const [selectedAddressHistory, setSelectedAddressHistory] = useState<AddressHistory | null>(null);
 
   // Workers state
   const [workers, setWorkers] = useState<Map<number, WorkerStats>>(new Map());
@@ -397,43 +419,6 @@ function MiningDashboardContent() {
     if (minutes < 60) return `${minutes}m ago`;
     const hours = Math.floor(minutes / 60);
     return `${hours}h ${minutes % 60}m ago`;
-  };
-
-  const getFilteredEntries = () => {
-    if (!history) return [];
-
-    const allEntries: Array<{ type: 'success' | 'error'; data: ReceiptEntry | ErrorEntry }> = [
-      ...history.receipts.map(r => ({ type: 'success' as const, data: r })),
-      ...history.errors.map(e => ({ type: 'error' as const, data: e }))
-    ];
-
-    // Filter by type if needed
-    const filtered = historyFilter === 'all' ? allEntries : allEntries.filter(e => e.type === historyFilter);
-
-    // Group by address index and challenge, then sort by date within each group
-    const grouped = new Map<string, typeof filtered>();
-    filtered.forEach(entry => {
-      const key = `${entry.data.addressIndex ?? '?'}:${entry.data.challenge_id}`;
-      if (!grouped.has(key)) {
-        grouped.set(key, []);
-      }
-      grouped.get(key)!.push(entry);
-    });
-
-    // Sort entries within each group by date (desc)
-    grouped.forEach(group => {
-      group.sort((a, b) => new Date(b.data.ts).getTime() - new Date(a.data.ts).getTime());
-    });
-
-    // Convert map to array and sort groups by latest timestamp (desc)
-    const sortedGroups = Array.from(grouped.values()).sort((a, b) => {
-      const aLatest = new Date(a[0].data.ts).getTime();
-      const bLatest = new Date(b[0].data.ts).getTime();
-      return bLatest - aLatest;
-    });
-
-    // Flatten groups back to single array
-    return sortedGroups.flat();
   };
 
   // Load history when switching to history tab and auto-refresh every 30 seconds
@@ -1060,7 +1045,7 @@ function MiningDashboardContent() {
                         : 'bg-gray-700 text-gray-300 hover:bg-gray-600'
                     )}
                   >
-                    All ({history.receipts.length + history.errors.length})
+                    All ({history.addressHistory.length})
                   </button>
                   <button
                     onClick={() => setHistoryFilter('success')}
@@ -1071,7 +1056,7 @@ function MiningDashboardContent() {
                         : 'bg-gray-700 text-gray-300 hover:bg-gray-600'
                     )}
                   >
-                    Success ({history.receipts.length})
+                    Success ({history.addressHistory.filter(h => h.status === 'success').length})
                   </button>
                   <button
                     onClick={() => setHistoryFilter('error')}
@@ -1082,7 +1067,7 @@ function MiningDashboardContent() {
                         : 'bg-gray-700 text-gray-300 hover:bg-gray-600'
                     )}
                   >
-                    Errors ({history.errors.length})
+                    Failed ({history.addressHistory.filter(h => h.status === 'failed').length})
                   </button>
                   <div className="ml-auto flex items-center gap-2">
                     <span className="text-xs text-gray-500">
@@ -1098,131 +1083,189 @@ function MiningDashboardContent() {
                   </div>
                 </div>
 
-                {/* History Entries */}
+                {/* Address History Table */}
                 <Card variant="bordered">
                   <CardHeader>
-                    <CardTitle className="text-xl">Solution History</CardTitle>
+                    <CardTitle className="text-xl">Solution History by Address</CardTitle>
                     <CardDescription>
-                      Showing {getFilteredEntries().length} {historyFilter === 'all' ? 'entries' : historyFilter === 'success' ? 'successful solutions' : 'errors'}
+                      Each row represents one address's attempt at a challenge
                     </CardDescription>
                   </CardHeader>
                   <CardContent>
-                    <div className="space-y-3 max-h-[600px] overflow-y-auto">
-                      {getFilteredEntries().length === 0 ? (
+                    <div className="space-y-2 max-h-[600px] overflow-y-auto">
+                      {history.addressHistory.length === 0 ? (
                         <div className="text-center py-12 text-gray-500">
                           <Calendar className="w-16 h-16 mx-auto mb-4 opacity-50" />
                           <p className="text-lg">No mining history yet</p>
                           <p className="text-sm">Start mining to see your solutions here</p>
                         </div>
                       ) : (
-                        getFilteredEntries().map((entry, index, array) => {
-                          // Check if this is a new address group (different address+challenge from previous entry)
-                          const prevEntry = index > 0 ? array[index - 1] : null;
-                          const isNewGroup = !prevEntry ||
-                            (prevEntry.data.addressIndex !== entry.data.addressIndex ||
-                             prevEntry.data.challenge_id !== entry.data.challenge_id);
-
-                          return (
-                            <React.Fragment key={index}>
-                              {isNewGroup && index > 0 && (
-                                <div className="border-t border-gray-700 my-4" />
+                        history.addressHistory
+                          .filter(h => {
+                            if (historyFilter === 'all') return true;
+                            if (historyFilter === 'success') return h.status === 'success';
+                            if (historyFilter === 'error') return h.status === 'failed';
+                            return true;
+                          })
+                          .map((addressHistory, index) => (
+                            <div
+                              key={`${addressHistory.addressIndex}-${addressHistory.challengeId}`}
+                              className={cn(
+                                'p-4 rounded-lg border transition-colors cursor-pointer hover:border-gray-600',
+                                addressHistory.status === 'success'
+                                  ? 'bg-green-900/10 border-green-700/50'
+                                  : 'bg-red-900/10 border-red-700/50'
                               )}
-                              <div
-                                className={cn(
-                                  'p-4 rounded-lg border transition-colors',
-                                  entry.type === 'success'
-                                    ? 'bg-green-900/10 border-green-700/50'
-                                    : 'bg-red-900/10 border-red-700/50'
-                                )}
-                              >
-                            <div className="flex items-start justify-between gap-4">
-                              <div className="flex-1 space-y-2">
+                              onClick={() => {
+                                if (addressHistory.failureCount > 0) {
+                                  setSelectedAddressHistory(addressHistory);
+                                  setFailureModalOpen(true);
+                                }
+                              }}
+                            >
+                              <div className="flex items-center justify-between gap-4">
+                                {/* Left: Address Info */}
+                                <div className="flex items-center gap-4 flex-1">
+                                  <div className="flex-shrink-0 w-16 h-16 rounded-lg bg-gray-800 flex items-center justify-center">
+                                    <span className="text-xl font-bold text-gray-300">#{addressHistory.addressIndex}</span>
+                                  </div>
+
+                                  <div className="flex-1 min-w-0">
+                                    <div className="flex items-center gap-2 mb-1">
+                                      <span className="text-white font-mono text-sm truncate">
+                                        {addressHistory.address.slice(0, 24)}...
+                                      </span>
+                                      <button
+                                        onClick={(e) => {
+                                          e.stopPropagation();
+                                          copyToClipboard(addressHistory.address, `addr-hist-${index}`);
+                                        }}
+                                        className="text-gray-400 hover:text-white transition-colors"
+                                      >
+                                        {copiedId === `addr-hist-${index}` ? (
+                                          <Check className="w-3 h-3 text-green-400" />
+                                        ) : (
+                                          <Copy className="w-3 h-3" />
+                                        )}
+                                      </button>
+                                    </div>
+                                    <div className="text-xs text-gray-500">
+                                      Challenge: {addressHistory.challengeId.slice(0, 16)}...
+                                    </div>
+                                  </div>
+                                </div>
+
+                                {/* Middle: Stats */}
+                                <div className="flex items-center gap-6">
+                                  <div className="text-center">
+                                    <div className="text-xs text-gray-400">Attempts</div>
+                                    <div className="text-lg font-bold text-white">{addressHistory.totalAttempts}</div>
+                                  </div>
+
+                                  {addressHistory.failureCount > 0 && (
+                                    <div className="text-center">
+                                      <div className="text-xs text-gray-400">Failures</div>
+                                      <div className="text-lg font-bold text-red-400">{addressHistory.failureCount}</div>
+                                    </div>
+                                  )}
+
+                                  {addressHistory.successCount > 0 && (
+                                    <div className="text-center">
+                                      <div className="text-xs text-gray-400">Success</div>
+                                      <div className="text-lg font-bold text-green-400">{addressHistory.successCount}</div>
+                                    </div>
+                                  )}
+                                </div>
+
+                                {/* Right: Status Badge */}
                                 <div className="flex items-center gap-2">
-                                  {entry.type === 'success' ? (
-                                    <CheckCircle2 className="w-5 h-5 text-green-400" />
+                                  {addressHistory.status === 'success' ? (
+                                    <div className="flex items-center gap-2 px-4 py-2 rounded-lg bg-green-500/20 border border-green-500/50">
+                                      <CheckCircle2 className="w-5 h-5 text-green-400" />
+                                      <span className="text-green-400 font-semibold">Success</span>
+                                    </div>
                                   ) : (
-                                    <XCircle className="w-5 h-5 text-red-400" />
-                                  )}
-                                  <span className="text-sm font-semibold text-white">
-                                    {entry.type === 'success' ? 'Solution Accepted' : 'Submission Failed'}
-                                  </span>
-                                  <span className="text-xs text-gray-500">
-                                    {formatDate(entry.data.ts)}
-                                  </span>
-                                </div>
-
-                                <div className="grid grid-cols-1 md:grid-cols-2 gap-2 text-sm">
-                                  <div>
-                                    <span className="text-gray-400">Address #{entry.data.addressIndex ?? '?'}:</span>
-                                    <div className="flex items-center gap-1">
-                                      <span className="text-white font-mono text-xs">
-                                        {entry.data.address.slice(0, 20)}...
-                                      </span>
-                                      <button
-                                        onClick={() => copyToClipboard(entry.data.address, `addr-${index}`)}
-                                        className="text-gray-400 hover:text-white transition-colors"
-                                      >
-                                        {copiedId === `addr-${index}` ? (
-                                          <Check className="w-3 h-3 text-green-400" />
-                                        ) : (
-                                          <Copy className="w-3 h-3" />
-                                        )}
-                                      </button>
-                                    </div>
-                                  </div>
-
-                                  <div>
-                                    <span className="text-gray-400">Challenge:</span>
-                                    <div className="flex items-center gap-1">
-                                      <span className="text-white font-mono text-xs">
-                                        {entry.data.challenge_id.slice(0, 16)}...
-                                      </span>
-                                      <button
-                                        onClick={() => copyToClipboard(entry.data.challenge_id, `chal-${index}`)}
-                                        className="text-gray-400 hover:text-white transition-colors"
-                                      >
-                                        {copiedId === `chal-${index}` ? (
-                                          <Check className="w-3 h-3 text-green-400" />
-                                        ) : (
-                                          <Copy className="w-3 h-3" />
-                                        )}
-                                      </button>
-                                    </div>
-                                  </div>
-
-                                  <div>
-                                    <span className="text-gray-400">Nonce:</span>
-                                    <span className="text-white font-mono text-xs ml-2">
-                                      {entry.data.nonce}
-                                    </span>
-                                  </div>
-
-                                  {entry.data.hash && (
-                                    <div>
-                                      <span className="text-gray-400">Hash:</span>
-                                      <span className="text-white font-mono text-xs ml-2">
-                                        {entry.data.hash.slice(0, 16)}...
-                                      </span>
+                                    <div className="flex items-center gap-2 px-4 py-2 rounded-lg bg-red-500/20 border border-red-500/50">
+                                      <XCircle className="w-5 h-5 text-red-400" />
+                                      <span className="text-red-400 font-semibold">Failed</span>
                                     </div>
                                   )}
-                                </div>
 
-                                {entry.type === 'error' && (
-                                  <div className="mt-2 p-2 bg-red-900/20 rounded text-xs">
-                                    <span className="text-red-400 font-semibold">Error: </span>
-                                    <span className="text-red-300">{(entry.data as ErrorEntry).error}</span>
-                                  </div>
-                                )}
+                                  {addressHistory.failureCount > 0 && (
+                                    <button
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                        setSelectedAddressHistory(addressHistory);
+                                        setFailureModalOpen(true);
+                                      }}
+                                      className="p-2 rounded-lg bg-gray-700 hover:bg-gray-600 transition-colors"
+                                      title="View failure details"
+                                    >
+                                      <AlertCircle className="w-5 h-5 text-yellow-400" />
+                                    </button>
+                                  )}
+                                </div>
                               </div>
                             </div>
-                              </div>
-                            </React.Fragment>
-                          );
-                        })
+                          ))
                       )}
                     </div>
                   </CardContent>
                 </Card>
+
+                {/* Failure Details Modal */}
+                <Modal
+                  isOpen={failureModalOpen}
+                  onClose={() => setFailureModalOpen(false)}
+                  title={`Failure Details - Address #${selectedAddressHistory?.addressIndex}`}
+                  size="lg"
+                >
+                  {selectedAddressHistory && (
+                    <div className="space-y-4">
+                      <div className="grid grid-cols-2 gap-4 p-4 bg-gray-800 rounded-lg">
+                        <div>
+                          <div className="text-sm text-gray-400">Address</div>
+                          <div className="text-white font-mono text-sm">{selectedAddressHistory.address}</div>
+                        </div>
+                        <div>
+                          <div className="text-sm text-gray-400">Challenge</div>
+                          <div className="text-white font-mono text-sm">{selectedAddressHistory.challengeId}</div>
+                        </div>
+                        <div>
+                          <div className="text-sm text-gray-400">Total Attempts</div>
+                          <div className="text-white text-lg font-bold">{selectedAddressHistory.totalAttempts}</div>
+                        </div>
+                        <div>
+                          <div className="text-sm text-gray-400">Failures</div>
+                          <div className="text-red-400 text-lg font-bold">{selectedAddressHistory.failureCount}</div>
+                        </div>
+                      </div>
+
+                      <div>
+                        <h3 className="text-lg font-semibold text-white mb-3">Failure Log</h3>
+                        <div className="space-y-2 max-h-[400px] overflow-y-auto">
+                          {selectedAddressHistory.failures.map((failure, idx) => (
+                            <div key={idx} className="p-3 bg-red-900/10 border border-red-700/50 rounded-lg">
+                              <div className="flex items-start justify-between gap-4 mb-2">
+                                <span className="text-xs text-gray-400">{formatDate(failure.ts)}</span>
+                                <span className="text-xs text-gray-500 font-mono">Nonce: {failure.nonce}</span>
+                              </div>
+                              <div className="text-sm text-red-300">
+                                <span className="text-red-400 font-semibold">Error: </span>
+                                {failure.error}
+                              </div>
+                              {failure.hash && (
+                                <div className="text-xs text-gray-500 font-mono mt-1">
+                                  Hash: {failure.hash}
+                                </div>
+                              )}
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                </Modal>
               </>
             ) : (
               <div className="text-center py-12 text-gray-500">

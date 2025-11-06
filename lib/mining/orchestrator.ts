@@ -455,7 +455,7 @@ class MiningOrchestrator extends EventEmitter {
       if (!this.isRunning || !this.isMining || this.currentChallengeId !== currentChallengeId) break;
 
       // Track submission failures for this address
-      const MAX_SUBMISSION_FAILURES = 10;
+      const MAX_SUBMISSION_FAILURES = 6;
       let addressSolved = false;
 
       console.log(`[Orchestrator] ========================================`);
@@ -518,8 +518,10 @@ class MiningOrchestrator extends EventEmitter {
     }
 
     // Capture challenge details at START to prevent race conditions
+    // CRITICAL: Make a DEEP COPY of the challenge object to prevent the polling loop
+    // from updating our captured challenge data while we're mining
     const challengeId = this.currentChallengeId;
-    const challenge = this.currentChallenge;
+    const challenge = { ...this.currentChallenge }; // Shallow copy creates new object reference
     const difficulty = challenge.difficulty;
 
     // ROM should already be ready from pollAndMine - quick check only
@@ -565,8 +567,14 @@ class MiningOrchestrator extends EventEmitter {
     let batchCounter = 0;
     let lastProgressTime = Date.now();
 
-    // Mine continuously with random nonces using BATCH processing
-    while (this.isRunning && this.isMining && this.currentChallengeId === challengeId) {
+    // Sequential nonce range for this worker (like midnight-scavenger-bot)
+    const NONCE_RANGE_SIZE = 1_000_000_000; // 1 billion per worker
+    const nonceStart = workerId * NONCE_RANGE_SIZE;
+    const nonceEnd = nonceStart + NONCE_RANGE_SIZE;
+    let currentNonce = nonceStart;
+
+    // Mine continuously with sequential nonces using BATCH processing
+    while (this.isRunning && this.isMining && this.currentChallengeId === challengeId && currentNonce < nonceEnd) {
       // Check if we're still mining the correct address
       if (!isDevFee && this.currentMiningAddress !== addr.bech32) {
         console.log(`[Orchestrator] Worker ${workerId}: Current address changed (was ${addr.index}), stopping`);
@@ -621,9 +629,9 @@ class MiningOrchestrator extends EventEmitter {
 
       batchCounter++;
 
-      // Generate batch of nonces and preimages
+      // Generate batch of sequential nonces and preimages (like midnight-scavenger-bot)
       const batchData: Array<{ nonce: string; preimage: string }> = [];
-      for (let i = 0; i < BATCH_SIZE; i++) {
+      for (let i = 0; i < BATCH_SIZE && (currentNonce + i) < nonceEnd; i++) {
         // Check if this worker should stop immediately
         if (this.stoppedWorkers.has(workerId)) {
           console.log(`[Orchestrator] Worker ${workerId}: Stopped during batch generation (another worker found solution)`);
@@ -639,7 +647,8 @@ class MiningOrchestrator extends EventEmitter {
           break;
         }
 
-        const nonceHex = generateNonce(workerId); // Each worker uses different nonce space
+        const nonceNum = currentNonce + i;
+        const nonceHex = nonceNum.toString(16).padStart(16, '0'); // Sequential nonce
         const preimage = buildPreimage(
           nonceHex,
           addr.bech32,
@@ -649,6 +658,9 @@ class MiningOrchestrator extends EventEmitter {
 
         batchData.push({ nonce: nonceHex, preimage });
       }
+
+      // Advance nonce counter for next batch
+      currentNonce += batchData.length;
 
       if (batchData.length === 0) break;
 
@@ -749,79 +761,15 @@ class MiningOrchestrator extends EventEmitter {
 
             // CRITICAL: Double-check challenge hasn't changed before submitting
             if (this.currentChallengeId !== challengeId) {
-              console.log(`[Orchestrator] Worker ${addr.index}: Challenge changed before submission (${challengeId.slice(0, 8)}... -> ${this.currentChallengeId?.slice(0, 8)}...), discarding solution`);
+              console.log(`[Orchestrator] Worker ${workerId}: Challenge changed before submission (${challengeId.slice(0, 8)}... -> ${this.currentChallengeId?.slice(0, 8)}...), discarding solution`);
               this.pausedAddresses.delete(submissionKey);
               this.submittingAddresses.delete(submissionKey);
               return; // Don't submit solution for old challenge
             }
 
-            // CRITICAL: Fetch FRESH challenge data before submission
-            // The `latest_submission` field changes frequently as other miners submit solutions
-            // We must recompute the hash with the CURRENT challenge data that the server will use
-            console.log(`[Orchestrator] Worker ${workerId}: Fetching fresh challenge data for submission validation...`);
-            let freshChallenge: Challenge;
-            try {
-              const challengeResponse = await this.fetchChallenge();
-              if (challengeResponse.code !== 'active' || !challengeResponse.challenge) {
-                console.log(`[Orchestrator] Worker ${workerId}: Challenge no longer active, discarding solution`);
-                this.pausedAddresses.delete(submissionKey);
-                this.submittingAddresses.delete(submissionKey);
-                return;
-              }
-              freshChallenge = challengeResponse.challenge;
-
-              // Verify challenge ID hasn't changed
-              if (freshChallenge.challenge_id !== challengeId) {
-                console.log(`[Orchestrator] Worker ${workerId}: Challenge changed while fetching (${challengeId} -> ${freshChallenge.challenge_id}), discarding solution`);
-                this.pausedAddresses.delete(submissionKey);
-                this.submittingAddresses.delete(submissionKey);
-                return;
-              }
-            } catch (error: any) {
-              console.error(`[Orchestrator] Worker ${workerId}: Failed to fetch fresh challenge:`, error.message);
-              this.pausedAddresses.delete(submissionKey);
-              this.submittingAddresses.delete(submissionKey);
-              return;
-            }
-
-            // Recompute hash with FRESH challenge data
-            console.log(`[Orchestrator] Worker ${workerId}: Recomputing hash with fresh challenge data...`);
-            console.log(`[Orchestrator]   Old latest_submission: ${challenge.latest_submission}`);
-            console.log(`[Orchestrator]   New latest_submission: ${freshChallenge.latest_submission}`);
-            console.log(`[Orchestrator]   Old no_pre_mine_hour:  ${challenge.no_pre_mine_hour}`);
-            console.log(`[Orchestrator]   New no_pre_mine_hour:  ${freshChallenge.no_pre_mine_hour}`);
-
-            const freshPreimage = buildPreimage(nonce, addr.bech32, freshChallenge, false);
-            let freshHash: string;
-            try {
-              freshHash = await hashEngine.hashAsync(freshPreimage);
-            } catch (error: any) {
-              console.error(`[Orchestrator] Worker ${workerId}: Failed to compute fresh hash:`, error.message);
-              this.pausedAddresses.delete(submissionKey);
-              this.submittingAddresses.delete(submissionKey);
-              return;
-            }
-
-            // Verify fresh hash still meets difficulty
-            const freshDifficulty = freshChallenge.difficulty;
-            if (!matchesDifficulty(freshHash, freshDifficulty)) {
-              console.log(`[Orchestrator] Worker ${workerId}: Fresh hash no longer meets difficulty (challenge data changed), discarding solution`);
-              console.log(`[Orchestrator]   Old hash: ${hash.slice(0, 32)}...`);
-              console.log(`[Orchestrator]   New hash: ${freshHash.slice(0, 32)}...`);
-              this.pausedAddresses.delete(submissionKey);
-              this.submittingAddresses.delete(submissionKey);
-              // Resume workers to find new solution
-              this.stoppedWorkers.clear();
-              continue; // Continue mining with fresh data
-            }
-
-            console.log(`[Orchestrator] Worker ${workerId}: Fresh hash verification passed!`);
-            console.log(`[Orchestrator]   Fresh hash: ${freshHash.slice(0, 32)}...`);
-
-            // Update nonce, hash, and preimage to use fresh values
-            const finalNonce = nonce;
-            const finalHash = freshHash;
-            const finalPreimage = freshPreimage;
+            // Submit immediately with the challenge data we used during mining
+            // Like midnight-scavenger-bot: no fresh fetch, no recomputation, just submit
+            console.log(`[Orchestrator] Worker ${workerId}: Submitting solution immediately (no fresh fetch)`);
 
             // CRITICAL: Check if difficulty changed during mining
             // If difficulty increased (more zero bits required), our solution may no longer be valid
