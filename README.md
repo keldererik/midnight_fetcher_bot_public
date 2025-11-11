@@ -32,12 +32,13 @@ This software includes a small development fee to support ongoing maintenance an
 
 ## Quick Start
 
-### Prerequisites
+### Windows Installation
 
+**Prerequisites:**
 - Windows 10/11
 - Internet connection
 
-### Installation
+**Steps:**
 
 1. **Download** this repository (or clone with git)
 
@@ -48,13 +49,61 @@ This software includes a small development fee to support ongoing maintenance an
 
 3. The setup script will:
    - ✅ Check/install Node.js 20.x
-   - ✅ Check/install Rust toolchain
-   - ✅ Build native mining module
+   - ✅ Verify pre-built hash server
    - ✅ Install all dependencies
    - ✅ Build the application
    - ✅ Open your browser and start the app
 
 4. **Access the app** at `http://localhost:3001`
+
+### Ubuntu/Linux Server Installation
+
+**Prerequisites:**
+- Ubuntu 20.04+ (or compatible Linux distribution)
+- SSH access with sudo privileges
+- Internet connection
+
+**Steps:**
+
+1. **Download and extract** the repository:
+   ```bash
+   wget https://github.com/ADA-Markets/midnight_fetcher_bot_public/archive/main.zip
+   unzip main.zip
+   cd midnight_fetcher_bot_public
+   ```
+
+2. **Run initial setup** (first time only):
+   ```bash
+   chmod +x setup.sh
+   ./setup.sh
+   ```
+
+   The setup script will:
+   - ✅ Install Node.js 20.x
+   - ✅ Install build tools (gcc, g++, make)
+   - ✅ Install Rust toolchain
+   - ✅ Build optimized hash server (+15-38% performance vs standard build)
+   - ✅ Install dependencies
+   - ✅ Start services
+
+3. **Access the web dashboard:**
+   ```
+   http://YOUR_SERVER_IP:3001
+   ```
+
+4. **Manage services** (after initial setup):
+   ```bash
+   ./start.sh   # Start services in background
+   ./stop.sh    # Stop all services
+   ./status.sh  # Check if services are running
+   ./logs.sh    # View live logs
+   ```
+
+**Firewall Configuration** (if needed):
+```bash
+sudo ufw allow 3001/tcp
+sudo ufw reload
+```
 
 ## Usage
 
