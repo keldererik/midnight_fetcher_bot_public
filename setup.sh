@@ -4,21 +4,31 @@
 # ============================================================================
 # This script performs complete setup:
 # 1. Checks/installs Node.js 20.x
-# 2. Checks/installs Rust toolchain
-# 3. Builds optimized hash server with performance improvements
-# 4. Installs all dependencies
-# 5. Builds NextJS application
-# 6. Starts the app
+# 2. Checks/installs build-essential (gcc, g++, etc.)
+# 3. Checks/installs Rust toolchain
+# 4. Builds optimized hash server with performance improvements
+# 5. Installs all dependencies
+# 6. Creates required directories
+# 7. Starts the app
 #
 # NOTE: Builds optimized hash server with +15-38% performance improvement
 # ============================================================================
 
 set -e  # Exit on error
 
+# Auto-detect CPU cores, allow override via argument or env var
+WORKERS=${1:-${WORKERS:-$(nproc)}}
+# Cap at 32 to avoid excessive memory usage
+if [ "$WORKERS" -gt 32 ]; then
+    WORKERS=32
+fi
+
 echo ""
 echo "================================================================================"
 echo "                    Midnight Fetcher Bot - Setup"
 echo "================================================================================"
+echo ""
+echo "Detected $(nproc) CPU cores - will configure $WORKERS worker threads"
 echo ""
 
 # ============================================================================
@@ -68,9 +78,26 @@ else
 fi
 
 # ============================================================================
+# Check Build Tools (C Compiler)
+# ============================================================================
+echo "[2/6] Checking build tools..."
+if ! command -v gcc &> /dev/null; then
+    echo "C compiler (gcc) not found. Installing build-essential..."
+    echo ""
+    sudo apt-get update
+    sudo apt-get install -y build-essential pkg-config libssl-dev
+    echo "Build tools installed!"
+    echo ""
+else
+    echo "Build tools found!"
+    gcc --version | head -n1
+    echo ""
+fi
+
+# ============================================================================
 # Check Rust Installation
 # ============================================================================
-echo "[2/6] Checking Rust installation..."
+echo "[3/6] Checking Rust installation..."
 if ! command -v cargo &> /dev/null; then
     echo "Rust not found. Installing Rust..."
     echo ""
@@ -88,7 +115,7 @@ fi
 # ============================================================================
 # Build Optimized Hash Server
 # ============================================================================
-echo "[3/6] Building optimized hash server..."
+echo "[4/6] Building optimized hash server..."
 echo ""
 echo "Optimizations enabled:"
 echo "  + mimalloc allocator"
@@ -147,7 +174,7 @@ echo ""
 # ============================================================================
 # Install dependencies
 # ============================================================================
-echo "[4/6] Installing project dependencies..."
+echo "[5/6] Installing project dependencies..."
 npm install
 echo "Dependencies installed!"
 echo ""
@@ -155,7 +182,7 @@ echo ""
 # ============================================================================
 # Create required directories
 # ============================================================================
-echo "[5/6] Creating required directories..."
+echo "[6/6] Creating required directories..."
 mkdir -p secure
 mkdir -p storage
 mkdir -p logs
@@ -168,7 +195,7 @@ echo "==========================================================================
 echo "                         Setup Complete!"
 echo "================================================================================"
 echo ""
-echo "[6/6] Starting services..."
+echo "[7/7] Starting services..."
 echo ""
 
 # Stop any existing instances
@@ -176,11 +203,11 @@ pkill -f hash-server || true
 pkill -f "next" || true
 
 # Start hash server in background
-echo "Starting hash server on port 9001..."
+echo "Starting hash server on port 9001 with $WORKERS workers..."
 export RUST_LOG=hash_server=info,actix_web=warn
 export HOST=127.0.0.1
 export PORT=9001
-export WORKERS=12
+export WORKERS=$WORKERS
 
 nohup ./hashengine/target/release/hash-server > logs/hash-server.log 2>&1 &
 HASH_SERVER_PID=$!
@@ -229,45 +256,48 @@ npm run build
 echo "  - Production build complete!"
 echo ""
 
-# Start NextJS production server
+# Start NextJS production server in background
 echo "Starting Next.js production server..."
-npm start &
+nohup npm start > logs/nextjs.log 2>&1 &
 NEXTJS_PID=$!
 echo "  - Next.js server starting (PID: $NEXTJS_PID)..."
 echo ""
 
 # Wait for Next.js to be ready
 echo "Waiting for Next.js to initialize..."
-sleep 5
-echo "  - Next.js server is ready!"
-echo ""
+sleep 8
 
-# Try to open browser (if running in graphical environment)
-if command -v xdg-open &> /dev/null; then
-    echo "Opening web interface..."
-    xdg-open http://localhost:3001 2>/dev/null || true
+# Check if Next.js is responding
+if curl -s http://localhost:3001 > /dev/null 2>&1; then
+    echo "  - Next.js server is ready!"
+else
+    echo "  - Next.js may still be starting..."
 fi
+echo ""
 
 echo ""
 echo "================================================================================"
-echo "Both services are running!"
-echo "Hash Server PID: $HASH_SERVER_PID"
-echo "Next.js PID: $NEXTJS_PID"
-echo ""
-echo "Press Ctrl+C to stop..."
+echo "                    Setup Complete - Services Running!"
 echo "================================================================================"
-
-# Trap Ctrl+C to cleanup
-cleanup() {
-    echo ""
-    echo "Stopping services..."
-    kill $NEXTJS_PID 2>/dev/null || true
-    pkill -f hash-server 2>/dev/null || true
-    echo "Services stopped."
-    exit 0
-}
-
-trap cleanup SIGINT SIGTERM
-
-# Wait for Next.js process
-wait $NEXTJS_PID
+echo ""
+echo "✅ Hash Server:     Running (PID: $HASH_SERVER_PID)"
+echo "✅ Next.js Server:  Running (PID: $NEXTJS_PID)"
+echo ""
+echo "📊 Web Dashboard:   http://localhost:3001"
+echo "🔧 Hash Service:    http://127.0.0.1:9001/health"
+echo ""
+echo "📁 Data Location:   ~/Documents/MidnightFetcherBot/"
+echo ""
+echo "💡 Useful Commands:"
+echo "   ./status.sh  - Check service status"
+echo "   ./logs.sh    - View live logs"
+echo "   ./stop.sh    - Stop all services"
+echo "   ./start.sh   - Restart services"
+echo ""
+echo "🎯 Next Steps:"
+echo "   1. Open http://localhost:3001 in your browser"
+echo "   2. Create a new wallet or load existing one"
+echo "   3. Start mining!"
+echo ""
+echo "================================================================================"
+echo ""
