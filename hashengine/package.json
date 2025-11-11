@@ -4,8 +4,8 @@
   "description": "Node.js bindings for native hash engine",
   "main": "index.node",
   "scripts": {
-    "build": "build.cmd",
-    "build:debug": "cargo build && build.cmd"
+    "build": "node ../scripts/hash-build.mjs",
+    "build:debug": "cargo build && node ../scripts/hash-build.mjs"
   },
   "devDependencies": {
     "@napi-rs/cli": "^2.16.0"
